@@ -1,0 +1,20 @@
+{
+  "name": "someproject-visual-test",
+  "version": "1.0.0",
+  "description": "Visual regression testing tool — screenshots stored in Cloudflare R2",
+  "scripts": {
+    "fetch-sitemap": "node fetch-sitemap.js",
+    "take-screenshots": "node take-screenshots.js",
+    "compare": "node compare-screenshots.js",
+    "list": "node list-screenshots.js",
+    "storage": "node storage.js",
+    "delete": "node delete-set.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-fetch": "2.7.0",
+    "pixelmatch": "5.3.0",
+    "pngjs": "^6.0.0",
+    "puppeteer-core": "^22.0.0"
+  }
+}

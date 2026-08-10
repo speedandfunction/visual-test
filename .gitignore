@@ -1,0 +1,5 @@
+node_modules/
+sitemap.txt
+reports/
+.env
+*.DS_Store
