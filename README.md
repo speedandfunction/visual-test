@@ -18,20 +18,24 @@ Go to [dash.cloudflare.com](https://dash.cloudflare.com) and sign up if you don'
 2. Click **Purchase R2 Plan** and add a payment method (required even for the free tier)
 3. Free tier includes: **10 GB storage**, **1M writes/month**, **10M reads/month**, no egress fees
 
-### 3. Create an API Token
+### 3. Find your Account ID
 
-1. Click your profile icon (top right) → **My Profile → API Tokens → Create Token**
-2. Click **Create Custom Token**
-3. Give it a name, e.g. `someproject-visual-test`
-4. Under **Permissions**, add:
-   - **Workers R2 Storage → Edit**
-5. Click **Continue to Summary → Create Token**
-6. **Copy the token immediately** — it is only shown once
+Your Account ID is visible in the URL of any Cloudflare dashboard page:  
+`https://dash.cloudflare.com/<account-id>/...`
 
-### 4. Find your Account ID
+Copy it — you'll need it for `.env`.
 
-On any R2 page, your Account ID is visible in the URL:  
-`https://dash.cloudflare.com/<account-id>/r2/...`
+### 4. Create an API Token
+
+1. Go to **https://dash.cloudflare.com/&lt;account-id&gt;/api-tokens**  
+   (replace `<account-id>` with yours)
+2. Click **Create Token**
+3. Click **Create Custom Token** (at the bottom of the template list)
+4. Give it a name, e.g. `someproject-visual-test`
+5. Under **Permissions**, set the three dropdowns to:  
+   **Account** → **Workers R2 Storage** → **Edit**
+6. Click **Continue to Summary → Create Token**
+7. **Copy the token immediately** — it is only shown once
 
 ### 5. Configure .env
 
