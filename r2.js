@@ -76,20 +76,30 @@ async function upload(key, buffer, contentType = 'image/png') {
 }
 
 /**
- * Download an object from R2 as a Buffer.
+ * Download an object from R2 as a Buffer, with automatic retry on transient errors.
  * @param {string} key
+ * @param {number} retries
  * @returns {Promise<Buffer>}
  */
-async function download(key) {
-  const res = await fetch(`${BASE}/buckets/${BUCKET_NAME}/objects/${key}`, {
-    headers: AUTH,
-  });
+async function download(key, retries = 4) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const res = await fetch(`${BASE}/buckets/${BUCKET_NAME}/objects/${key}`, {
+      headers: AUTH,
+    });
 
-  if (!res.ok) {
+    if (res.ok) return Buffer.from(await res.arrayBuffer());
+
+    // Transient Cloudflare / server errors — retry with backoff
+    const transient = [429, 500, 502, 503, 504, 523, 524];
+    if (transient.includes(res.status) && attempt < retries) {
+      const wait = attempt * 2000; // 2s, 4s, 6s
+      process.stderr.write(` [${res.status}, retry ${attempt}/${retries - 1} in ${wait / 1000}s]`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+
     throw new Error(`R2 download failed for "${key}": ${res.status}`);
   }
-
-  return Buffer.from(await res.arrayBuffer());
 }
 
 /**
