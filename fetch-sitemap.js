@@ -22,6 +22,10 @@ if (!SITEMAP_INDEX) {
   console.error('Error: SITEMAP_INDEX must be set in .env');
   process.exit(1);
 }
+
+const BASIC_AUTH = (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS)
+  ? { username: process.env.BASIC_AUTH_USER, password: process.env.BASIC_AUTH_PASS }
+  : null;
 const OUT_FILE      = path.join(__dirname, 'sitemap.txt');
 const TIMEOUT_MS    = 15_000;
 
@@ -29,9 +33,14 @@ const TIMEOUT_MS    = 15_000;
 function fetchRaw(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
+    const headers = { 'User-Agent': 'VisualTestBot/1.0 (visual-regression-test)' };
+    if (BASIC_AUTH) {
+      const creds = Buffer.from(`${BASIC_AUTH.username}:${BASIC_AUTH.password}`).toString('base64');
+      headers['Authorization'] = `Basic ${creds}`;
+    }
     const req = client.get(
       url,
-      { headers: { 'User-Agent': 'VisualTestBot/1.0 (visual-regression-test)' }, timeout: TIMEOUT_MS },
+      { headers, timeout: TIMEOUT_MS },
       res => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           const loc = res.headers.location.startsWith('http')

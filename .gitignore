@@ -3,3 +3,4 @@ sitemap.txt
 reports/
 .env
 *.DS_Store
+sitemap.*.txt
