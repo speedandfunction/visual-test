@@ -227,6 +227,8 @@ reports/
 | `R2_BUCKET`     | R2 bucket name (default: `someproject-visual-test`)        |
 | `SITEMAP_INDEX` | Sitemap URL to crawl                                         |
 | `R2_PUBLIC_URL` | Public dev URL from R2 bucket settings (e.g. `https://pub-xxxx.r2.dev`) |
+| `BASIC_AUTH_USER` | Basic auth username (optional)                             |
+| `BASIC_AUTH_PASS` | Basic auth password (optional)                             |
 | `CHROME_PATH`   | Path to Chrome (only needed if not at default macOS location)|
 
 ---

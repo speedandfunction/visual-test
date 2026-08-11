@@ -34,6 +34,11 @@ const CHROME_PATH     =
 
 const SITEMAP_FILE = path.join(__dirname, 'sitemap.txt');
 
+// Basic auth — reads from .env; null if not configured
+const BASIC_AUTH = (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS)
+  ? { username: process.env.BASIC_AUTH_USER, password: process.env.BASIC_AUTH_PASS }
+  : null;
+
 // ── CSS: kill banners, freeze animations ─────────────────────────────────────
 const NORMALISE_CSS = `
   [class*="cookie" i], [class*="consent" i], [class*="gdpr" i],
@@ -137,6 +142,7 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
     const page = await browser.newPage();
     await page.setViewport({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+    if (BASIC_AUTH) await page.authenticate(BASIC_AUTH);
 
     while (queue.length > 0) {
       const { url, filename } = queue.shift();
@@ -172,7 +178,8 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
   const ts = timestamp();
   console.log(`\n📸 Screenshot run [${ts}]`);
   console.log(`   URLs: ${urls.length}  |  Viewport: ${VIEWPORT_WIDTH}px  |  Concurrency: ${CONCURRENCY}`);
-  console.log(`   R2 bucket: ${r2.BUCKET_NAME}\n`);
+  console.log(`   R2 bucket: ${r2.BUCKET_NAME}`);
+  console.log(`   Basic auth: ${BASIC_AUTH ? `✓ (${BASIC_AUTH.username})` : 'none'}\n`);
 
   if (dryRun) {
     console.log('-- DRY RUN: URLs that would be screenshotted --');
