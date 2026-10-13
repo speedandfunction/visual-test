@@ -27,7 +27,7 @@ const r2        = require('./r2');
 const VIEWPORT_WIDTH  = 1280;
 const VIEWPORT_HEIGHT = 900;
 const TIMEOUT_MS      = 30_000;
-const CONCURRENCY     = 3;
+const CONCURRENCY     = 2;
 const CHROME_PATH     =
   process.env.CHROME_PATH ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -127,30 +127,41 @@ async function screenshotAndUpload(page, url, r2Key) {
     await r2.upload(r2Key, buffer, 'image/png');
 
     console.log(`    ✓ ${r2Key}`);
-  } catch (e) {
-    console.error(`    ✗ ${url} — ${e.message}`);
   } finally {
     if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
   }
 }
 
 // ── Worker pool ───────────────────────────────────────────────────────────────
+async function newPage(browser) {
+  const page = await browser.newPage();
+  await page.setViewport({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  if (BASIC_AUTH) await page.authenticate(BASIC_AUTH);
+  return page;
+}
+
 async function runWithConcurrency(browser, items, ts, concurrency) {
   const queue = [...items];
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    const page = await browser.newPage();
-    await page.setViewport({ width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT });
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-    if (BASIC_AUTH) await page.authenticate(BASIC_AUTH);
+    let page = await newPage(browser);
 
     while (queue.length > 0) {
       const { url, filename } = queue.shift();
       const key = `screenshots/${ts}/${filename}`;
-      await screenshotAndUpload(page, url, key);
+
+      try {
+        await screenshotAndUpload(page, url, key);
+      } catch (e) {
+        // Page/session crashed — open a fresh one and continue
+        console.error(`    ✗ ${url} — ${e.message}`);
+        try { await page.close(); } catch {}
+        page = await newPage(browser);
+      }
     }
 
-    await page.close();
+    try { await page.close(); } catch {}
   });
 
   await Promise.all(workers);

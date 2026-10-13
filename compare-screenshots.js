@@ -29,6 +29,7 @@ const { PNG }    = require('pngjs');
 const pixelmatch = require('pixelmatch');
 const fs         = require('fs');
 const path       = require('path');
+const fetch      = require('node-fetch');
 const r2         = require('./r2');
 
 const SITE_NAME = process.env.SITE_NAME || 'site';
@@ -62,6 +63,52 @@ function buildUrlMap() {
     } catch { /* skip */ }
   }
   return map;
+}
+
+// ── Redirect detection ───────────────────────────────────────────────────────
+const REDIRECT_TIMEOUT_MS = 15_000;
+const MAX_REDIRECT_HOPS   = 10;
+
+const AUTH_HEADER = (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS)
+  ? { Authorization: 'Basic ' + Buffer.from(`${process.env.BASIC_AUTH_USER}:${process.env.BASIC_AUTH_PASS}`).toString('base64') }
+  : {};
+
+// Same page = same host + path + query, ignoring protocol, "www." and trailing slash
+function samePage(a, b) {
+  const norm = u => {
+    const x = new URL(u);
+    const host = x.host.replace(/^www\./i, '').toLowerCase();
+    const p = x.pathname.replace(/\/+$/, '') || '/';
+    return `${host}${p}${x.search}`;
+  };
+  try { return norm(a) === norm(b); } catch { return false; }
+}
+
+/**
+ * Follows redirects manually. Returns the final URL if the page ends up on a
+ * different page than requested, otherwise null. Network errors → null
+ * (page is compared as usual).
+ */
+async function detectRedirect(url) {
+  let current = url;
+  try {
+    for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
+      const res = await fetch(current, {
+        method: 'GET',
+        redirect: 'manual',
+        timeout: REDIRECT_TIMEOUT_MS,
+        headers: { 'User-Agent': 'Mozilla/5.0 (visual-test redirect check)', ...AUTH_HEADER },
+      });
+      if (res.body && typeof res.body.destroy === 'function') res.body.destroy();
+
+      const location = res.headers.get('location');
+      if (res.status < 300 || res.status >= 400 || !location) break;
+      current = new URL(location, current).toString();
+    }
+  } catch {
+    return null;
+  }
+  return samePage(url, current) ? null : current;
 }
 
 // ── Image helpers ─────────────────────────────────────────────────────────────
@@ -110,6 +157,7 @@ const BASE_CSS = `
   .chip-ok      { background: #1a2e22; color: #4ade80; border: 1px solid #14532d; }
   .chip-new     { background: #1c2c42; color: #60a5fa; border: 1px solid #1e40af; }
   .chip-missing { background: #2a1f10; color: #fb923c; border: 1px solid #7c2d12; }
+  .chip-redirect { background: #261f3a; color: #a78bfa; border: 1px solid #5b21b6; }
   .summary { display: flex; gap: 12px; flex-wrap: wrap; padding: 20px 32px; }
   @media (max-width: 900px) { .topbar, main, .summary { padding-left: 16px; padding-right: 16px; } }
 `;
@@ -118,6 +166,7 @@ function buildHtml({ tsBefore, tsAfter, results, totalCompared }) {
   const changed  = results.filter(r => r.changed);
   const newPages = results.filter(r => r.status === 'new');
   const missing  = results.filter(r => r.status === 'missing');
+  const redirects = results.filter(r => r.status === 'redirect');
 
   const pageRows = changed.map(r => {
     const label = r.url
@@ -158,8 +207,13 @@ function buildHtml({ tsBefore, tsAfter, results, totalCompared }) {
     return `<li class="${cls}">${lbl} <em>${note}</em></li>`;
   }).join('\n');
 
-  const extras = (newPages.length || missing.length) ? `
+  const redirectItems = redirects.map(r =>
+    `<li class="status-redirect"><strong>${r.file}</strong> … ↪️ redirect detected → <a href="${r.redirectTo}" target="_blank" rel="noopener">${r.redirectTo}</a></li>`
+  ).join('\n');
+
+  const extras = (newPages.length || missing.length || redirects.length) ? `
 <section class="extras">
+  ${redirects.length ? `<h2>Redirected pages — not compared (${redirects.length})</h2><ul>${redirectItems}</ul>` : ''}
   ${newPages.length ? `<h2>New pages (${newPages.length})</h2><ul>${listItems(newPages, 'status-new', '(not in before set)')}</ul>` : ''}
   ${missing.length  ? `<h2>Missing pages (${missing.length})</h2><ul>${listItems(missing, 'status-missing', '(missing in after set)')}</ul>` : ''}
 </section>` : '';
@@ -204,6 +258,7 @@ ${BASE_CSS}
   .extras li { font-size: .85rem; padding: 7px 12px; border-radius: 6px; }
   .status-new     { background: #1c2c42; border-left: 3px solid #3b82f6; }
   .status-missing { background: #2a1f10; border-left: 3px solid #f97316; }
+  .status-redirect { background: #261f3a; border-left: 3px solid #a78bfa; word-break: break-all; }
   @media (max-width: 900px) { .img-row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -224,6 +279,7 @@ ${BASE_CSS}
   <div class="chip chip-ok">✅ ${totalCompared - changed.length} unchanged</div>
   ${newPages.length ? `<div class="chip chip-new">🆕 ${newPages.length} new</div>` : ''}
   ${missing.length  ? `<div class="chip chip-missing">⚠️ ${missing.length} missing</div>` : ''}
+  ${redirects.length ? `<div class="chip chip-redirect">↪️ ${redirects.length} redirected</div>` : ''}
 </div>
 ${noChanges}
 <main>${pageRows}</main>
@@ -288,6 +344,16 @@ ${extras}
       continue;
     }
 
+    // Skip pages that redirect to another URL
+    if (url) {
+      const redirectTo = await detectRedirect(url);
+      if (redirectTo) {
+        console.log(`↪  redirect detected → ${redirectTo}`);
+        results.push({ name, file, url, status: 'redirect', redirectTo, changed: false });
+        continue;
+      }
+    }
+
     // Download both
     const [bufBefore, bufAfter] = await Promise.all([
       r2.download(beforeFiles.get(file)),
@@ -319,7 +385,8 @@ ${extras}
   // Sort by diff % descending
   results.sort((a, b) => (b.pct || 0) - (a.pct || 0));
 
-  const compared     = [...beforeFiles.keys()].filter(f => afterFiles.has(f)).length;
+  const redirectCount = results.filter(r => r.status === 'redirect').length;
+  const compared      = [...beforeFiles.keys()].filter(f => afterFiles.has(f)).length - redirectCount;
   const changedCount = results.filter(r => r.changed).length;
 
   // Write HTML report
@@ -349,6 +416,7 @@ ${extras}
 
   console.log(`\n✅ Done.`);
   console.log(`   ${changedCount} pages changed / ${compared} compared`);
+  if (redirectCount) console.log(`   ${redirectCount} pages skipped (redirect detected)`);
   console.log(`   Local report: ${reportFile}`);
   if (publicUrl) {
     console.log(`   Public URL:   ${publicUrl}`);

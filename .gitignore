@@ -1,6 +1,6 @@
 node_modules/
 sitemap.txt
 reports/
-.env
+.env*
 *.DS_Store
 sitemap.*.txt
