@@ -402,12 +402,25 @@ ${extras}
   await r2.upload(`${reportPrefix}/index.html`, fs.readFileSync(reportFile), 'text/html');
 
   // Upload before/after/diff images for changed pages
+  // A single failed image (after retries) shouldn't kill the whole run —
+  // log it and keep going; the local report is already written.
+  const failedUploads = [];
   for (const r of results.filter(x => x.changed)) {
-    await r2.upload(`${reportPrefix}/before/${r.file}`, fs.readFileSync(path.join(beforeDir, r.file)), 'image/png');
-    await r2.upload(`${reportPrefix}/after/${r.file}`,  fs.readFileSync(path.join(afterDir,  r.file)), 'image/png');
-    await r2.upload(`${reportPrefix}/diff/${r.file}`,   fs.readFileSync(path.join(diffDir,   r.file)), 'image/png');
+    for (const [sub, dir] of [['before', beforeDir], ['after', afterDir], ['diff', diffDir]]) {
+      const key = `${reportPrefix}/${sub}/${r.file}`;
+      try {
+        await r2.upload(key, fs.readFileSync(path.join(dir, r.file)), 'image/png');
+      } catch (err) {
+        failedUploads.push(key);
+        process.stderr.write(`\n  ⚠ ${err.message}\n`);
+      }
+    }
   }
-  console.log('done');
+  console.log(failedUploads.length ? `done with ${failedUploads.length} failed upload(s)` : 'done');
+  if (failedUploads.length) {
+    console.log('   Failed keys (re-run to retry):');
+    for (const k of failedUploads) console.log(`     - ${k}`);
+  }
 
   const publicBase = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '');
   const publicUrl  = publicBase

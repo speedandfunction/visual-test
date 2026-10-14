@@ -62,15 +62,38 @@ async function ensureBucket() {
  * @param {Buffer} buffer
  * @param {string} contentType
  */
-async function upload(key, buffer, contentType = 'image/png') {
-  const res = await fetch(`${BASE}/buckets/${BUCKET_NAME}/objects/${key}`, {
-    method: 'PUT',
-    headers: { ...AUTH, 'Content-Type': contentType },
-    body: buffer,
-  });
+async function upload(key, buffer, contentType = 'image/png', retries = 5) {
+  const transient = [429, 500, 502, 503, 504, 520, 522, 523, 524];
 
-  if (!res.ok) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    let res;
+    try {
+      res = await fetch(`${BASE}/buckets/${BUCKET_NAME}/objects/${key}`, {
+        method: 'PUT',
+        headers: { ...AUTH, 'Content-Type': contentType },
+        body: buffer,
+      });
+    } catch (err) {
+      // Network-level failure (ECONNRESET, ETIMEDOUT, …) — treat as transient
+      if (attempt < retries) {
+        const wait = attempt * 2000;
+        process.stderr.write(` [${err.code || 'network error'}, retry ${attempt}/${retries - 1} in ${wait / 1000}s]`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw new Error(`R2 upload failed for "${key}": ${err.message}`);
+    }
+
+    if (res.ok) return;
+
     const body = await res.text();
+    if (transient.includes(res.status) && attempt < retries) {
+      const wait = attempt * 2000; // 2s, 4s, 6s, 8s
+      process.stderr.write(` [${res.status}, retry ${attempt}/${retries - 1} in ${wait / 1000}s]`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+
     throw new Error(`R2 upload failed for "${key}": ${res.status} ${body}`);
   }
 }
