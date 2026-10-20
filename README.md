@@ -102,6 +102,7 @@ node take-screenshots.js
 - Takes a full-page screenshot (1280 px wide) of every URL in `sitemap.txt`
 - Uploads each PNG directly to R2 at `screenshots/<timestamp>/`
 - No local copies are kept
+- **File links** (PDF, Word/Excel/PowerPoint, zip, images, media — see `FILE_EXTENSIONS` in `files.js`) are **not** screenshotted. They are downloaded and a SHA-256 fingerprint is saved as a text file next to the screenshots: `screenshots/<timestamp>/<filename>.txt` (url, sha256, size, HTTP status, content-type, last-modified, etag). `compare-screenshots.js` compares these hashes and prints an alert (link + before/after fingerprint) for every file that changed; the report shows them in a "Files — fingerprint check" section. PDF screenshots from older runs are ignored.
 
 To preview which URLs would be captured without actually running:
 

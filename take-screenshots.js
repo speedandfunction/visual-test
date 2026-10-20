@@ -6,6 +6,11 @@
  *
  * R2 path: screenshots/<YYYY-MM-DD_HH-MM-SS>/<filename>.png
  *
+ * Links to files (PDF, Office docs, archives, images…) are NOT screenshotted.
+ * They are downloaded and fingerprinted (SHA-256) instead; the fingerprint is
+ * stored as a text file next to the screenshots:
+ *   screenshots/<YYYY-MM-DD_HH-MM-SS>/<filename>.txt
+ *
  * Prerequisites:
  *   npm install
  *   Google Chrome installed at the default macOS path (or set CHROME_PATH)
@@ -22,6 +27,7 @@ const fs        = require('fs');
 const path      = require('path');
 const os        = require('os');
 const r2        = require('./r2');
+const files     = require('./files');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const VIEWPORT_WIDTH  = 1280;
@@ -38,6 +44,10 @@ const SITEMAP_FILE = path.join(__dirname, 'sitemap.txt');
 const BASIC_AUTH = (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS)
   ? { username: process.env.BASIC_AUTH_USER, password: process.env.BASIC_AUTH_PASS }
   : null;
+
+const AUTH_HEADER = BASIC_AUTH
+  ? { Authorization: 'Basic ' + Buffer.from(`${BASIC_AUTH.username}:${BASIC_AUTH.password}`).toString('base64') }
+  : {};
 
 // ── CSS: kill banners, freeze animations ─────────────────────────────────────
 const NORMALISE_CSS = `
@@ -132,6 +142,14 @@ async function screenshotAndUpload(page, url, r2Key) {
   }
 }
 
+// ── Fingerprint one file link, upload the .txt to R2 ─────────────────────────
+async function fingerprintAndUpload(url, r2Key) {
+  const fp = await files.fingerprintUrl(url, AUTH_HEADER);
+  await r2.upload(r2Key, Buffer.from(files.formatFingerprint(fp), 'utf8'), 'text/plain; charset=utf-8');
+  const warn = fp.sha256.startsWith('ERROR') ? `  ⚠ ${fp.sha256}` : '';
+  console.log(`    ✓ ${r2Key}  (sha256 ${fp.sha256.slice(0, 12)}…, ${fp.size} bytes)${warn}`);
+}
+
 // ── Worker pool ───────────────────────────────────────────────────────────────
 async function newPage(browser) {
   const page = await browser.newPage();
@@ -149,6 +167,18 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
 
     while (queue.length > 0) {
       const { url, filename } = queue.shift();
+
+      // File links (PDF etc.) → fingerprint instead of screenshot
+      if (files.isFileUrl(url)) {
+        const key = `screenshots/${ts}/${files.fingerprintFilename(filename)}`;
+        try {
+          await fingerprintAndUpload(url, key);
+        } catch (e) {
+          console.error(`    ✗ ${url} — ${e.message}`);
+        }
+        continue;
+      }
+
       const key = `screenshots/${ts}/${filename}`;
 
       try {
@@ -188,13 +218,14 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
 
   const ts = timestamp();
   console.log(`\n📸 Screenshot run [${ts}]`);
-  console.log(`   URLs: ${urls.length}  |  Viewport: ${VIEWPORT_WIDTH}px  |  Concurrency: ${CONCURRENCY}`);
+  const fileCount = urls.filter(files.isFileUrl).length;
+  console.log(`   URLs: ${urls.length} (${urls.length - fileCount} pages, ${fileCount} files fingerprinted)  |  Viewport: ${VIEWPORT_WIDTH}px  |  Concurrency: ${CONCURRENCY}`);
   console.log(`   R2 bucket: ${r2.BUCKET_NAME}`);
   console.log(`   Basic auth: ${BASIC_AUTH ? `✓ (${BASIC_AUTH.username})` : 'none'}\n`);
 
   if (dryRun) {
     console.log('-- DRY RUN: URLs that would be screenshotted --');
-    urls.forEach(u => console.log(` • ${u}`));
+    urls.forEach(u => console.log(` • ${u}${files.isFileUrl(u) ? '  [file → fingerprint]' : ''}`));
     console.log(`\nTotal: ${urls.length} URLs`);
     return;
   }
@@ -229,6 +260,6 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
     await browser.close();
   }
 
-  console.log(`\n✅ Done. ${urls.length} screenshots at: screenshots/${ts}/`);
+  console.log(`\n✅ Done. ${urls.length - fileCount} screenshots + ${fileCount} fingerprints at: screenshots/${ts}/`);
   console.log(`   Run "node list-screenshots.js" to see all available timestamps.`);
 })();

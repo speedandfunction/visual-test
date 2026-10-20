@@ -21,6 +21,10 @@
  *     diff/               ← pixel-diff images
  *
  *   R2: diffs/<ts-before>_vs_<ts-after>/<filename>.png
+ *
+ * File links (PDF etc.) are not pixel-diffed: their SHA-256 fingerprints
+ * (screenshots/<ts>/<filename>.txt, written by take-screenshots.js) are
+ * compared instead and any mismatch is reported as an alert.
  */
 
 'use strict';
@@ -31,6 +35,7 @@ const fs         = require('fs');
 const path       = require('path');
 const fetch      = require('node-fetch');
 const r2         = require('./r2');
+const files      = require('./files');
 
 const SITE_NAME = process.env.SITE_NAME || 'site';
 
@@ -158,11 +163,45 @@ const BASE_CSS = `
   .chip-new     { background: #1c2c42; color: #60a5fa; border: 1px solid #1e40af; }
   .chip-missing { background: #2a1f10; color: #fb923c; border: 1px solid #7c2d12; }
   .chip-redirect { background: #261f3a; color: #a78bfa; border: 1px solid #5b21b6; }
+  .chip-file    { background: #2a2410; color: #facc15; border: 1px solid #713f12; }
   .summary { display: flex; gap: 12px; flex-wrap: wrap; padding: 20px 32px; }
   @media (max-width: 900px) { .topbar, main, .summary { padding-left: 16px; padding-right: 16px; } }
 `;
 
-function buildHtml({ tsBefore, tsAfter, results, totalCompared }) {
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function buildFileSection(fileResults, legacySkipped) {
+  if (!fileResults.length && !legacySkipped) return '';
+  const changed = fileResults.filter(r => r.status === 'changed');
+  const newF    = fileResults.filter(r => r.status === 'new');
+  const missF   = fileResults.filter(r => r.status === 'missing');
+  const same    = fileResults.filter(r => r.status === 'ok');
+  const link = r => r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a>` : esc(r.name);
+
+  const changedRows = changed.map(r => `
+  <div class="fp-card">
+    <div class="fp-title">⚠️ ${link(r)}</div>
+    <div class="fp-row"><span>Before</span><code>${esc(r.before.sha256)}</code><em>${esc(r.before.size)} bytes</em></div>
+    <div class="fp-row"><span>After</span><code>${esc(r.after.sha256)}</code><em>${esc(r.after.size)} bytes</em></div>
+  </div>`).join('\n');
+
+  const simpleList = (items, cls, note) => items.map(r =>
+    `<li class="${cls}">${link(r)} <em>${note}</em></li>`).join('\n');
+
+  return `
+<section class="files">
+  <h2>Files — fingerprint check (${fileResults.length})</h2>
+  <p class="fp-summary">${changed.length} changed · ${same.length} unchanged${newF.length ? ` · ${newF.length} new` : ''}${missF.length ? ` · ${missF.length} missing` : ''}
+  ${legacySkipped ? `<br><small>${legacySkipped} legacy file screenshot(s) (e.g. PDF .png) ignored — re-run take-screenshots.js to fingerprint them.</small>` : ''}</p>
+  ${changed.length ? `<div class="fp-alert">🔔 ${changed.length} file(s) have a different fingerprint</div>${changedRows}` : (fileResults.length ? '<div class="fp-ok">✅ All file fingerprints match.</div>' : '')}
+  ${newF.length  ? `<h3>No fingerprint in before set (${newF.length})</h3><ul>${simpleList(newF, 'status-new', '(new)')}</ul>` : ''}
+  ${missF.length ? `<h3>No fingerprint in after set (${missF.length})</h3><ul>${simpleList(missF, 'status-missing', '(missing)')}</ul>` : ''}
+</section>`;
+}
+
+function buildHtml({ tsBefore, tsAfter, results, totalCompared, fileResults = [], legacySkipped = 0 }) {
   const changed  = results.filter(r => r.changed);
   const newPages = results.filter(r => r.status === 'new');
   const missing  = results.filter(r => r.status === 'missing');
@@ -259,6 +298,21 @@ ${BASE_CSS}
   .status-new     { background: #1c2c42; border-left: 3px solid #3b82f6; }
   .status-missing { background: #2a1f10; border-left: 3px solid #f97316; }
   .status-redirect { background: #261f3a; border-left: 3px solid #a78bfa; word-break: break-all; }
+  .files { padding: 0 32px 24px; }
+  .files h2 { font-size: .9rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: .07em; margin: 8px 0 10px; }
+  .files h3 { font-size: .8rem; color: #94a3b8; margin: 16px 0 8px; }
+  .files ul { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .files li { font-size: .85rem; padding: 7px 12px; border-radius: 6px; word-break: break-all; }
+  .fp-summary { font-size: .85rem; color: #94a3b8; margin-bottom: 12px; }
+  .fp-summary small { color: #64748b; }
+  .fp-alert { background: #3b1f2b; border: 1px solid #7f1d1d; color: #fca5a5; padding: 10px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 10px; }
+  .fp-ok { background: #1a2e22; border: 1px solid #14532d; color: #4ade80; padding: 10px 14px; border-radius: 8px; }
+  .fp-card { background: #1a1f2e; border: 1px solid #2d3748; border-left: 3px solid #ef4444; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .fp-title { font-size: .9rem; font-weight: 600; word-break: break-all; margin-bottom: 8px; }
+  .fp-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: .8rem; margin-top: 4px; }
+  .fp-row span { width: 50px; color: #64748b; text-transform: uppercase; font-weight: 600; font-size: .7rem; }
+  .fp-row code { font-family: ui-monospace, Menlo, monospace; color: #e2e8f0; word-break: break-all; }
+  .fp-row em { color: #64748b; font-style: normal; }
   @media (max-width: 900px) { .img-row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -280,8 +334,10 @@ ${BASE_CSS}
   ${newPages.length ? `<div class="chip chip-new">🆕 ${newPages.length} new</div>` : ''}
   ${missing.length  ? `<div class="chip chip-missing">⚠️ ${missing.length} missing</div>` : ''}
   ${redirects.length ? `<div class="chip chip-redirect">↪️ ${redirects.length} redirected</div>` : ''}
+  ${fileResults.length ? `<div class="chip chip-file">📎 ${fileResults.filter(r => r.status === 'changed').length} / ${fileResults.length} files changed</div>` : ''}
 </div>
 ${noChanges}
+${buildFileSection(fileResults, legacySkipped)}
 <main>${pageRows}</main>
 ${extras}
 </body>
@@ -316,9 +372,55 @@ ${extras}
   if (afterKeys.length === 0)  { console.error(`No screenshots found for ${tsAfter}`);  process.exit(1); }
 
   // Build file sets
-  const beforeFiles = new Map(beforeKeys.map(k => [path.basename(k), k]));
-  const afterFiles  = new Map(afterKeys.map(k => [path.basename(k), k]));
+  //  - .png  → page screenshots (pixel diff)
+  //  - .txt  → file fingerprints (hash compare)
+  //  - .png of a file link (e.g. "…newsletter.pdf.png") from older runs → ignored
+  let legacySkipped = 0;
+  const pngMap = keys => new Map(keys
+    .filter(k => k.endsWith('.png'))
+    .filter(k => { if (files.isFileScreenshotName(path.basename(k))) { legacySkipped++; return false; } return true; })
+    .map(k => [path.basename(k), k]));
+  const txtMap = keys => new Map(keys.filter(k => k.endsWith('.txt')).map(k => [path.basename(k), k]));
+
+  const beforeFiles = pngMap(beforeKeys);
+  const afterFiles  = pngMap(afterKeys);
   const allFiles    = new Set([...beforeFiles.keys(), ...afterFiles.keys()]);
+
+  const beforeFps = txtMap(beforeKeys);
+  const afterFps  = txtMap(afterKeys);
+  const allFps    = new Set([...beforeFps.keys(), ...afterFps.keys()]);
+
+  // ── Fingerprint comparison (PDFs and other files) ──────────────────────────
+  const fileResults = [];
+  const urlMapFp    = buildUrlMap();
+  if (allFps.size) console.log(`Files (fingerprints): ${allFps.size}\n`);
+  let fIdx = 0;
+  for (const file of allFps) {
+    fIdx++;
+    const name = file.replace(/\.txt$/, '');
+    process.stdout.write(`  [${fIdx}/${allFps.size}] ${file} … `);
+
+    const [txtBefore, txtAfter] = await Promise.all([
+      beforeFps.has(file) ? r2.download(beforeFps.get(file)).then(b => b.toString('utf8')) : null,
+      afterFps.has(file)  ? r2.download(afterFps.get(file)).then(b => b.toString('utf8'))  : null,
+    ]);
+    const before = txtBefore != null ? files.parseFingerprint(txtBefore) : null;
+    const after  = txtAfter  != null ? files.parseFingerprint(txtAfter)  : null;
+    const url    = (after && after.url) || (before && before.url) || urlMapFp[name] || null;
+
+    if (!before) { console.log('NEW'); fileResults.push({ name, file, url, status: 'new', after }); continue; }
+    if (!after)  { console.log('MISSING'); fileResults.push({ name, file, url, status: 'missing', before }); continue; }
+
+    if (before.sha256 === after.sha256) {
+      console.log('✓  same fingerprint');
+      fileResults.push({ name, file, url, status: 'ok', before, after });
+    } else {
+      console.log('⚠  FINGERPRINT CHANGED');
+      fileResults.push({ name, file, url, status: 'changed', before, after });
+    }
+  }
+  if (legacySkipped) console.log(`\n  (ignored ${legacySkipped} legacy screenshot(s) of file links, e.g. PDF .png)`);
+  if (allFps.size || legacySkipped) console.log('\nPages (screenshots):\n');
 
   const urlMap  = buildUrlMap();
   const results = [];
@@ -390,7 +492,7 @@ ${extras}
   const changedCount = results.filter(r => r.changed).length;
 
   // Write HTML report
-  const html       = buildHtml({ tsBefore, tsAfter, results, totalCompared: compared });
+  const html       = buildHtml({ tsBefore, tsAfter, results, totalCompared: compared, fileResults, legacySkipped });
   const reportFile = path.join(reportDir, 'index.html');
   fs.writeFileSync(reportFile, html, 'utf8');
 
@@ -430,6 +532,20 @@ ${extras}
   console.log(`\n✅ Done.`);
   console.log(`   ${changedCount} pages changed / ${compared} compared`);
   if (redirectCount) console.log(`   ${redirectCount} pages skipped (redirect detected)`);
+
+  const changedFps = fileResults.filter(r => r.status === 'changed');
+  if (fileResults.length) {
+    console.log(`   ${changedFps.length} files changed / ${fileResults.length} fingerprinted`);
+  }
+  if (changedFps.length) {
+    console.log(`\n🔔 ALERT: ${changedFps.length} file(s) have a different fingerprint:`);
+    for (const r of changedFps) {
+      console.log(`\n   ${r.url || r.name}`);
+      console.log(`     before: ${r.before.sha256}`);
+      console.log(`     after:  ${r.after.sha256}`);
+    }
+    console.log('');
+  }
   console.log(`   Local report: ${reportFile}`);
   if (publicUrl) {
     console.log(`   Public URL:   ${publicUrl}`);
