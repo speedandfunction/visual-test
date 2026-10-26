@@ -15,8 +15,17 @@
  *   npm install
  *   Google Chrome installed at the default macOS path (or set CHROME_PATH)
  *
+ * Resume / checkpoint:
+ *   Progress is saved to ./.screenshot-progress.json after every finished URL
+ *   (the R2 folder timestamp + the list of URLs already done). If the run is
+ *   stopped (Ctrl+C, crash, closed laptop), running the script again continues
+ *   in the SAME R2 folder and skips the URLs that are already done.
+ *   The checkpoint is ignored (a new run starts) if sitemap.txt or the R2
+ *   bucket changed since it was written. It is deleted when the run completes.
+ *
  * Usage:
- *   node take-screenshots.js           # all URLs from sitemap.txt
+ *   node take-screenshots.js           # all URLs from sitemap.txt (resumes if a checkpoint exists)
+ *   node take-screenshots.js --fresh   # ignore the checkpoint, start a new run
  *   node take-screenshots.js --dry-run # print URLs only, don't screenshot
  */
 
@@ -38,7 +47,8 @@ const CHROME_PATH     =
   process.env.CHROME_PATH ||
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
-const SITEMAP_FILE = path.join(__dirname, 'sitemap.txt');
+const SITEMAP_FILE  = path.join(__dirname, 'sitemap.txt');
+const PROGRESS_FILE = path.join(__dirname, '.screenshot-progress.json');
 
 // Basic auth — reads from .env; null if not configured
 const BASIC_AUTH = (process.env.BASIC_AUTH_USER && process.env.BASIC_AUTH_PASS)
@@ -66,6 +76,32 @@ const NORMALISE_CSS = `
   }
   video { display: none !important; }
 `;
+
+// ── Checkpoint (resume support) ──────────────────────────────────────────────
+function hashUrls(urls) {
+  return require('crypto').createHash('sha256').update(urls.join('\n')).digest('hex');
+}
+
+function loadProgress() {
+  try {
+    return JSON.parse(fs.readFileSync(PROGRESS_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// Atomic write: write to a temp file, then rename, so a kill mid-write
+// never leaves a corrupt checkpoint behind.
+function saveProgress(progress) {
+  progress.updatedAt = new Date().toISOString();
+  const tmp = PROGRESS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(progress, null, 2));
+  fs.renameSync(tmp, PROGRESS_FILE);
+}
+
+function clearProgress() {
+  try { fs.unlinkSync(PROGRESS_FILE); } catch {}
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function timestamp() {
@@ -159,22 +195,34 @@ async function newPage(browser) {
   return page;
 }
 
-async function runWithConcurrency(browser, items, ts, concurrency) {
+async function runWithConcurrency(browser, items, ts, concurrency, progress, stats) {
   const queue = [...items];
+  const doneSet = new Set(progress.done);
+
+  const markDone = url => {
+    if (doneSet.has(url)) return;
+    doneSet.add(url);
+    progress.done.push(url);
+    saveProgress(progress);
+    stats.ok++;
+  };
 
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     let page = await newPage(browser);
 
-    while (queue.length > 0) {
+    while (queue.length > 0 && !stats.stopping) {
       const { url, filename } = queue.shift();
+      const prefix = `[${progress.done.length + 1}/${progress.total}]`;
 
       // File links (PDF etc.) → fingerprint instead of screenshot
       if (files.isFileUrl(url)) {
         const key = `screenshots/${ts}/${files.fingerprintFilename(filename)}`;
         try {
           await fingerprintAndUpload(url, key);
+          markDone(url);
         } catch (e) {
-          console.error(`    ✗ ${url} — ${e.message}`);
+          stats.failed++;
+          console.error(`    ✗ ${prefix} ${url} — ${e.message}`);
         }
         continue;
       }
@@ -183,9 +231,12 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
 
       try {
         await screenshotAndUpload(page, url, key);
+        markDone(url);
       } catch (e) {
+        if (stats.stopping) break; // browser is closing because of Ctrl+C
         // Page/session crashed — open a fresh one and continue
-        console.error(`    ✗ ${url} — ${e.message}`);
+        stats.failed++;
+        console.error(`    ✗ ${prefix} ${url} — ${e.message}`);
         try { await page.close(); } catch {}
         page = await newPage(browser);
       }
@@ -216,17 +267,55 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
     process.exit(1);
   }
 
-  const ts = timestamp();
-  console.log(`\n📸 Screenshot run [${ts}]`);
+  // ── Resume from checkpoint, or start a new run ──
+  const fresh       = process.argv.includes('--fresh');
+  const sitemapHash = hashUrls(urls);
+  const saved       = fresh ? null : loadProgress();
+  let progress;
+
+  if (saved && saved.sitemapHash === sitemapHash && saved.bucket === r2.BUCKET_NAME && saved.ts) {
+    progress = { ...saved, total: urls.length, done: saved.done || [] };
+  } else {
+    if (saved) {
+      const why = saved.bucket !== r2.BUCKET_NAME
+        ? `bucket changed (${saved.bucket} → ${r2.BUCKET_NAME})`
+        : 'sitemap.txt changed';
+      console.log(`\n⚠  Ignoring old checkpoint (${why}); starting a new run.`);
+    }
+    progress = {
+      ts:          timestamp(),
+      bucket:      r2.BUCKET_NAME,
+      sitemapHash,
+      total:       urls.length,
+      startedAt:   new Date().toISOString(),
+      done:        [],
+    };
+  }
+
+  const ts       = progress.ts;
+  const doneSet  = new Set(progress.done);
+  const resuming = doneSet.size > 0;
+  const todo     = urls.filter(u => !doneSet.has(u));
+
+  console.log(`\n📸 Screenshot run [${ts}]${resuming ? '  ↻ RESUMING' : ''}`);
   const fileCount = urls.filter(files.isFileUrl).length;
   console.log(`   URLs: ${urls.length} (${urls.length - fileCount} pages, ${fileCount} files fingerprinted)  |  Viewport: ${VIEWPORT_WIDTH}px  |  Concurrency: ${CONCURRENCY}`);
+  if (resuming) {
+    console.log(`   Already done: ${doneSet.size}  |  Remaining: ${todo.length}  (checkpoint: ${path.basename(PROGRESS_FILE)}, use --fresh to start over)`);
+  }
   console.log(`   R2 bucket: ${r2.BUCKET_NAME}`);
   console.log(`   Basic auth: ${BASIC_AUTH ? `✓ (${BASIC_AUTH.username})` : 'none'}\n`);
 
   if (dryRun) {
     console.log('-- DRY RUN: URLs that would be screenshotted --');
-    urls.forEach(u => console.log(` • ${u}${files.isFileUrl(u) ? '  [file → fingerprint]' : ''}`));
-    console.log(`\nTotal: ${urls.length} URLs`);
+    todo.forEach(u => console.log(` • ${u}${files.isFileUrl(u) ? '  [file → fingerprint]' : ''}`));
+    console.log(`\nTotal: ${todo.length} URLs${resuming ? ` (${doneSet.size} skipped, already done)` : ''}`);
+    return;
+  }
+
+  if (todo.length === 0) {
+    console.log(`✅ Nothing left to do — all ${urls.length} URLs are already in screenshots/${ts}/`);
+    clearProgress();
     return;
   }
 
@@ -241,7 +330,12 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
   await r2.ensureBucket();
   console.log('ok\n');
 
-  const items = urls.map(url => ({ url, filename: urlToFilename(url) }));
+  // Write the checkpoint up-front so the run folder is remembered even if
+  // the very first URL never finishes.
+  saveProgress(progress);
+
+  const items = todo.map(url => ({ url, filename: urlToFilename(url) }));
+  const stats = { ok: 0, failed: 0, stopping: false };
 
   const browser = await puppeteer.launch({
     executablePath: CHROME_PATH,
@@ -254,12 +348,35 @@ async function runWithConcurrency(browser, items, ts, concurrency) {
     ],
   });
 
+  // Ctrl+C / kill: progress is already on disk after every URL, so just stop
+  // cleanly. A second Ctrl+C exits immediately.
+  const onSignal = async signal => {
+    if (stats.stopping) process.exit(130);
+    stats.stopping = true;
+    console.log(`\n\n⏸  ${signal} received — stopping. ${progress.done.length}/${urls.length} done.`);
+    console.log(`   Run "node take-screenshots.js" again to continue in screenshots/${ts}/`);
+    try { await browser.close(); } catch {}
+    process.exit(130);
+  };
+  process.on('SIGINT',  onSignal);
+  process.on('SIGTERM', onSignal);
+
   try {
-    await runWithConcurrency(browser, items, ts, CONCURRENCY);
+    await runWithConcurrency(browser, items, ts, CONCURRENCY, progress, stats);
   } finally {
-    await browser.close();
+    if (!stats.stopping) await browser.close();
   }
 
-  console.log(`\n✅ Done. ${urls.length - fileCount} screenshots + ${fileCount} fingerprints at: screenshots/${ts}/`);
+  if (stats.stopping) return;
+
+  const remaining = urls.length - progress.done.length;
+  if (remaining > 0) {
+    // Some URLs failed — keep the checkpoint so a re-run retries only those.
+    console.log(`\n⚠  Finished with ${remaining} failed URL(s). ${progress.done.length}/${urls.length} done at: screenshots/${ts}/`);
+    console.log(`   Run "node take-screenshots.js" again to retry just the failed ones (or --fresh to start over).`);
+  } else {
+    clearProgress();
+    console.log(`\n✅ Done. ${urls.length - fileCount} screenshots + ${fileCount} fingerprints at: screenshots/${ts}/`);
+  }
   console.log(`   Run "node list-screenshots.js" to see all available timestamps.`);
 })();

@@ -4,3 +4,4 @@ reports/
 .env*
 *.DS_Store
 sitemap.*.txt
+.screenshot-progress.json
